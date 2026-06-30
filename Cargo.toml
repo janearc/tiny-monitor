@@ -40,6 +40,15 @@ serde_json = "1"
 # gen types is a later change, gated on obs-svc-agg emitting conformant protojson.
 big-little-mesh-contracts = { git = "https://github.com/janearc/big-little-mesh.git", rev = "07d7420bba66ff3111ba1b0f962250032e5eed41" }
 
+# delightd-contracts: the generated serde bindings for delightd's narrow widget-facing
+# resolve.v1 (ResolvedService{name, scheme, address}), consumed across the repo boundary by git
+# dependency. Like big-little-mesh-contracts, the crate lives at gen/rust/ -- a subdirectory of
+# delightd with no root Cargo.toml -- and cargo resolves it by package name from the repo tree.
+# Pinned to the rev that landed the Rust codegen target (delightd PR #63 / Closes #58) so the
+# contract surface is reproducible. src/resolve.rs uses it to turn a service NAME into the
+# address to poll, so the widget no longer carries obs-svc-agg's address as a hardcoded constant.
+delightd-contracts = { git = "https://github.com/janearc/delightd.git", rev = "7d2477f6c77ce0c9d346bb574d55251580fa3782" }
+
 # native macos windowing: objc2 + AppKit bindings. this is the maintained
 # successor to the cocoa/objc crates. used only by the binary (the NSWindow),
 # never by the tested logic.

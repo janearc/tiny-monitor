@@ -6,7 +6,11 @@
 pub mod fetch;
 pub mod model;
 pub mod render;
+pub mod resolve;
 
 pub use fetch::{fetch_snapshot, parse_snapshot, Config};
 pub use model::{Health, Snapshot};
 pub use render::{colour_for, RenderModel, Rgb, Row};
+pub use resolve::{
+    delightd_base_from_env, resolve_state_url, state_url_from, DEFAULT_DELIGHTD_URL,
+};

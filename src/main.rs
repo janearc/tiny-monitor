@@ -16,8 +16,8 @@ fn main() {
     use tiny_monitor::{fetch, render::RenderModel};
     let cfg = fetch::Config::from_env();
     eprintln!(
-        "tiny-monitor: no native window on this platform; polling {} once",
-        cfg.state_url
+        "tiny-monitor: no native window on this platform; resolving + polling once ({:?})",
+        cfg.source
     );
     let model = match fetch::fetch_snapshot(&cfg) {
         Ok(snap) => RenderModel::from_snapshot(&snap),
