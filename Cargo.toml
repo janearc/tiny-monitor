@@ -1,0 +1,73 @@
+[package]
+name = "tiny-monitor"
+version = "0.1.0"
+edition = "2021"
+description = "Frameless always-on-top macOS floating widget for fleet health and token runway."
+license = "MIT"
+publish = false
+
+# The widget is split so the load-bearing logic (fetch/parse the aggregator
+# snapshot, map health -> colour, render the glance text) is library code with
+# no AppKit dependency and is unit-tested headlessly. The binary is the thin
+# NSWindow shell that cannot be exercised without a display.
+[lib]
+name = "tiny_monitor"
+path = "src/lib.rs"
+
+[[bin]]
+name = "tiny-monitor"
+path = "src/main.rs"
+
+[dependencies]
+# blocking, single-threaded http client -- the poll loop is a 2s tick, so an
+# async runtime would be pure overhead. rustls avoids a system-openssl link;
+# the aggregator is plaintext localhost today, tls is for the eventual remote.
+ureq = { version = "2", default-features = false, features = ["json", "tls"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# big-little-mesh-contracts: the generated serde bindings for the observability
+# contracts (observability.v1.HealthState et al.), consumed across the repo
+# boundary by git dependency. The crate lives at gen/rust/ -- a subdirectory of
+# big-little-mesh with no root Cargo.toml -- and cargo resolves it by package
+# name from the repo tree regardless. Pinned to the rev that landed the Rust
+# codegen target (big-little-mesh PR #58) so the contract surface is reproducible.
+#
+# The read path (src/model.rs) deliberately stays hand-rolled on the BARE health
+# vocabulary the aggregator emits today; this dependency is the contract guardrail
+# (see tests/contract_conformance.rs), which fails the build if the hand-rolled
+# vocabulary drifts from the generated one. Migrating the read path onto these
+# gen types is a later change, gated on obs-svc-agg emitting conformant protojson.
+big-little-mesh-contracts = { git = "https://github.com/janearc/big-little-mesh.git", rev = "07d7420bba66ff3111ba1b0f962250032e5eed41" }
+
+# native macos windowing: objc2 + AppKit bindings. this is the maintained
+# successor to the cocoa/objc crates. used only by the binary (the NSWindow),
+# never by the tested logic.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.5"
+# block2 backs the NSTimer block that re-arms the poll loop on the run loop.
+block2 = "0.5"
+objc2-foundation = { version = "0.2", features = [
+    "NSString",
+    "NSGeometry",
+    "NSThread",
+    "NSDate",
+    "NSObjCRuntime",
+    "NSRunLoop",
+    "NSTimer",
+    "block2",
+] }
+objc2-app-kit = { version = "0.2", features = [
+    "NSApplication",
+    "NSWindow",
+    "NSView",
+    "NSTextField",
+    "NSColor",
+    "NSResponder",
+    "NSControl",
+    "NSText",
+    "NSFont",
+    "NSFontDescriptor",
+    "NSGraphics",
+    "NSRunningApplication",
+] }
