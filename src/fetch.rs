@@ -13,11 +13,30 @@ use std::time::Duration;
 
 use crate::model::Snapshot;
 
+// Source is how the widget obtains obs-svc-agg's /state URL each tick. The widget no longer
+// carries the aggregator's address as a hardcoded default: by default it RESOLVES the address
+// through delightd (the one well-known control plane), and only a deliberate human override
+// bypasses that. Retiring the old :8090 constant is the point of this seam -- the widget targets
+// a service by NAME and trusts delightd to say where it answers.
+#[derive(Debug, Clone)]
+pub enum Source {
+    // Explicit is a fixed /state URL from OBS_AGG_URL: a deliberate human override (a dev
+    // collector, a tunnel, a real service address) that skips resolution.
+    Explicit(String),
+    // Resolve asks delightd for the named service's address. delightd_base is delightd's
+    // control-port base; service is the registry name to resolve (e.g. "obs-svc-agg").
+    Resolve {
+        delightd_base: String,
+        service: String,
+    },
+}
+
 // Config is the widget's runtime configuration, resolved from the environment.
 #[derive(Debug, Clone)]
 pub struct Config {
-    // state_url is the full URL of the aggregator's /state endpoint.
-    pub state_url: String,
+    // source is how each tick obtains obs-svc-agg's /state URL: a human override, or
+    // resolution through delightd.
+    pub source: Source,
     // poll is the tick interval. The architecture's widget cadence is 2s.
     pub poll: Duration,
     // timeout bounds a single poll so a hung aggregator cannot stall the tick.
@@ -25,30 +44,48 @@ pub struct Config {
 }
 
 impl Config {
-    // from_env resolves configuration, defaulting to the obs-svc-agg address
-    // reachable on this host. Endpoints are not hardcoded into the widget: the
-    // URL and cadence are overridable, per the no-hardcoded-endpoints rule.
-    //
-    // The default targets the running obs-svc-agg container's published host
-    // port. The compose-internal port is 8090; the container currently maps it
-    // to a host port, so the default is overridable via OBS_AGG_URL for any
-    // mapping (and points at Traefik / a service address in a real deploy).
+    // from_env resolves configuration from the environment. By default the widget RESOLVES
+    // obs-svc-agg through delightd -- it does not hardcode the aggregator's address. An explicit
+    // OBS_AGG_URL is a human override that bypasses resolution; OBS_AGG_NAME overrides the
+    // registry name to resolve, and DELIGHTD_URL overrides delightd's control-port base.
     pub fn from_env() -> Self {
-        let state_url =
-            std::env::var("OBS_AGG_URL").unwrap_or_else(|_| DEFAULT_STATE_URL.to_string());
+        let source = match std::env::var("OBS_AGG_URL") {
+            Ok(url) => Source::Explicit(url),
+            Err(_) => Source::Resolve {
+                delightd_base: crate::resolve::delightd_base_from_env(),
+                service: std::env::var("OBS_AGG_NAME")
+                    .unwrap_or_else(|_| DEFAULT_OBS_AGG_NAME.to_string()),
+            },
+        };
         let poll = env_secs("OBS_POLL_SECS", DEFAULT_POLL_SECS);
         let timeout = env_secs("OBS_TIMEOUT_SECS", DEFAULT_TIMEOUT_SECS);
         Config {
-            state_url,
+            source,
             poll,
             timeout,
         }
     }
+
+    // state_url returns the /state URL to poll this tick. An Explicit source returns its URL;
+    // a Resolve source asks delightd and FAILS LOUDLY (Err) when delightd cannot answer -- the
+    // widget never substitutes a hardcoded address, so a degraded resolution stays visible (the
+    // caller renders the loud "NO DATA" view). Resolving each tick is deliberate: it is cheap (a
+    // localhost registry lookup) and self-healing -- the widget recovers the moment delightd and
+    // the registration return, and only ever shows data delightd can currently vouch for.
+    pub fn state_url(&self) -> Result<String, String> {
+        match &self.source {
+            Source::Explicit(url) => Ok(url.clone()),
+            Source::Resolve {
+                delightd_base,
+                service,
+            } => crate::resolve::resolve_state_url(delightd_base, service, self.timeout),
+        }
+    }
 }
 
-// DEFAULT_STATE_URL is the obs-svc-agg /state endpoint. Overridable via
-// OBS_AGG_URL; this default is the host-published port of the running container.
-pub const DEFAULT_STATE_URL: &str = "http://127.0.0.1:8090/state";
+// DEFAULT_OBS_AGG_NAME is the registry name the widget resolves through delightd to find the
+// observability aggregator. Overridable via OBS_AGG_NAME.
+pub const DEFAULT_OBS_AGG_NAME: &str = "obs-svc-agg";
 const DEFAULT_POLL_SECS: u64 = 2;
 const DEFAULT_TIMEOUT_SECS: u64 = 3;
 
@@ -67,8 +104,11 @@ fn env_secs(key: &str, default: u64) -> Duration {
 // A network error, a non-2xx status, or an unparseable body all surface as Err
 // so the caller renders the degraded "no data" view rather than stale state.
 pub fn fetch_snapshot(cfg: &Config) -> Result<Snapshot, String> {
+    // Resolve the target first: a Resolve source asks delightd, and a resolution miss surfaces
+    // here as Err (the loud degraded view) rather than the widget guessing an address.
+    let state_url = cfg.state_url()?;
     let agent = ureq::AgentBuilder::new().timeout(cfg.timeout).build();
-    let body = match agent.get(&cfg.state_url).call() {
+    let body = match agent.get(&state_url).call() {
         Ok(resp) => resp.into_string().map_err(|e| format!("read body: {e}"))?,
         Err(ureq::Error::Status(code, _)) => {
             return Err(format!("aggregator returned HTTP {code}"));
@@ -148,15 +188,42 @@ mod tests {
     }
 
     #[test]
-    fn config_defaults_when_env_absent() {
-        // guard the defaults without mutating process env (parallel-test safe).
+    fn config_default_source_resolves_through_delightd() {
+        // The widget no longer defaults to a hardcoded aggregator URL: absent an explicit
+        // override it resolves obs-svc-agg through delightd at the canonical control port.
         let cfg = Config {
-            state_url: DEFAULT_STATE_URL.to_string(),
+            source: Source::Resolve {
+                delightd_base: crate::resolve::DEFAULT_DELIGHTD_URL.to_string(),
+                service: DEFAULT_OBS_AGG_NAME.to_string(),
+            },
             poll: Duration::from_secs(DEFAULT_POLL_SECS),
             timeout: Duration::from_secs(DEFAULT_TIMEOUT_SECS),
         };
-        assert_eq!(cfg.state_url, "http://127.0.0.1:8090/state");
+        match &cfg.source {
+            Source::Resolve {
+                delightd_base,
+                service,
+            } => {
+                assert_eq!(delightd_base, "http://127.0.0.1:8088");
+                assert_eq!(service, "obs-svc-agg");
+            }
+            other => panic!("default source must resolve through delightd, got {other:?}"),
+        }
         assert_eq!(cfg.poll, Duration::from_secs(2));
+    }
+
+    #[test]
+    fn explicit_source_state_url_is_passthrough() {
+        // An explicit OBS_AGG_URL override bypasses resolution entirely (no network).
+        let cfg = Config {
+            source: Source::Explicit("http://127.0.0.1:9999/state".to_string()),
+            poll: Duration::from_secs(DEFAULT_POLL_SECS),
+            timeout: Duration::from_secs(DEFAULT_TIMEOUT_SECS),
+        };
+        assert_eq!(
+            cfg.state_url().expect("explicit passthrough"),
+            "http://127.0.0.1:9999/state"
+        );
     }
 
     #[test]
